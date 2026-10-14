@@ -24,11 +24,12 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
+# Virtual environments & local python toolchain
 .venv/
 venv/
 ENV/
 env/
+.python/
 
 # Locally cloned repositories
 chatterbox/

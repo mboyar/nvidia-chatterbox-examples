@@ -8,6 +8,8 @@ SKILL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if [ -f "${PWD}/.venv/bin/activate" ]; then
     source "${PWD}/.venv/bin/activate"
+elif [ -f "${SKILL_ROOT}/../../../.venv/bin/activate" ]; then
+    source "${SKILL_ROOT}/../../../.venv/bin/activate"
 elif [ -f "${SKILL_ROOT}/../../.venv/bin/activate" ]; then
     source "${SKILL_ROOT}/../../.venv/bin/activate"
 fi

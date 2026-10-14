@@ -9,12 +9,24 @@ import sys
 from pathlib import Path
 
 # 1. Automatically re-exec into project's .venv if running with system python
-_script_dir = Path(__file__).resolve().parent
-_venv_dir = _script_dir / ".venv"
-_venv_python = _venv_dir / "bin" / "python3"
-if _venv_python.exists() and Path(sys.prefix).resolve() != _venv_dir.resolve():
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
+def _find_venv() -> Path | None:
+    cwd_venv = Path.cwd() / ".venv"
+    if (cwd_venv / "bin" / "python3").exists():
+        return cwd_venv
+    curr = Path(__file__).resolve().parent
+    for _ in range(6):
+        candidate = curr / ".venv"
+        if (candidate / "bin" / "python3").exists():
+            return candidate
+        curr = curr.parent
+    return None
+
+_venv_dir = _find_venv()
+if _venv_dir:
+    _venv_python = _venv_dir / "bin" / "python3"
+    if _venv_python.exists() and Path(sys.prefix).resolve() != _venv_dir.resolve():
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
 
 # 2. Configure PyTorch unified memory allocator before importing torch
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"

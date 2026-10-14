@@ -55,7 +55,19 @@ def apply_patch(chatterbox_dir: Path):
         print("Please check resources/chatterbox_jetson.patch manually.")
         sys.exit(1)
 
+def _find_chatterbox_dir(arg_target: str | None = None) -> Path:
+    if arg_target:
+        return Path(arg_target)
+    if Path("chatterbox").exists():
+        return Path("chatterbox")
+    curr = Path(__file__).resolve().parent
+    for _ in range(5):
+        if (curr / "chatterbox").exists():
+            return curr / "chatterbox"
+        curr = curr.parent
+    return Path("chatterbox")
+
 if __name__ == "__main__":
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("chatterbox")
+    target = _find_chatterbox_dir(sys.argv[1] if len(sys.argv) > 1 else None)
     apply_patch(target)
 
