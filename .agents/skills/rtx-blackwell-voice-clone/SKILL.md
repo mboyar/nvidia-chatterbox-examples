@@ -40,6 +40,12 @@ This skill teaches the agent how to configure, patch, optimize, and run 100% off
    - In PyTorch 2.5+, never combine `expandable_segments:True` with `max_split_size_mb`.
 5. **Full NVML Telemetry**:
    - Unlike Jetson (which crashes on `NVML_SUCCESS == r`), the RTX PRO 2000 Blackwell fully supports NVML. `nvidia-smi`, `torch.cuda.memory_allocated()`, and VRAM monitoring work reliably without errors.
+6. **Critical Blackwell PyTorch Binary Requirement (`cu128` / `sm_120`)**:
+   - Standard PyTorch wheels built for CUDA 12.1/12.4 only compile kernels up to `sm_90` (Hopper). Running on Blackwell (`sm_120`) triggers:
+     `RuntimeError: CUDA error: no kernel image is available for execution on the device`
+   - You **MUST** install PyTorch wheels built with **CUDA 12.8+ (`cu128`)**:
+     `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128`
+   - Verify that `'sm_120'` is present in `torch.cuda.get_arch_list()`.
 
 For deep architectural comparisons, see [references/blackwell_gpu_architecture.md](./references/blackwell_gpu_architecture.md).
 
@@ -63,6 +69,12 @@ Because the RTX PRO 2000 Blackwell has 8GB of dedicated VRAM:
 ### C. Low VRAM Multitasking Mode (`--low-vram`)
 If running heavy local LLMs (e.g., LLaMA-3 8B) or image diffusion pipelines alongside Chatterbox on the same 8GB GPU, passing `--low-vram` automatically offloads T3 to CPU during vocoder inference, keeping peak VRAM **under 950 MB**.
 
+### D. Self-Bootstrapping Venv Auto-Detection
+On Linux/WSL2, invoking scripts via system Python (`/usr/bin/python3`) often triggers `ModuleNotFoundError: No module named 'numpy'`.
+`chatterbox_clone_rtx.py` includes a self-bootstrapping dynamic resolver:
+- Searches upward from the script location to find `.venv/bin/python3`.
+- Transparently re-execs with the project virtual environment, preventing environment mismatches.
+
 Read full technical optimization notes in [references/chatterbox_blackwell_optimizations.md](./references/chatterbox_blackwell_optimizations.md).
 
 ---
@@ -77,28 +89,31 @@ Run the included diagnostic smoke-test:
 ./.agents/skills/rtx-blackwell-voice-clone/scripts/test_synthesis.sh
 ```
 
-### Step 2: Create Python Virtual Environment with CUDA PyTorch
+### Step 2: Create Python Virtual Environment with CUDA 12.8 PyTorch
+Using `uv` (recommended for modern Ubuntu 24.04/26.04 environments):
 ```bash
-python3 -m venv .venv
+# Install uv if not present
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create Python 3.12 virtual environment
+uv venv .venv --python 3.12
 source .venv/bin/activate
 echo 'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"' >> .venv/bin/activate
 
-# Install PyTorch with CUDA 12.4+ support
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Install PyTorch with native Blackwell sm_120 support (CUDA 12.8+)
+uv pip install --python .venv/bin/python torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+# Install pip and core ML/audio dependencies
+uv pip install --python .venv/bin/python pip soundfile librosa huggingface_hub transformers diffusers pyloudnorm numpy
 ```
 
 ### Step 3: Clone and Patch Chatterbox for RTX Blackwell
 ```bash
 git clone https://github.com/resemble-ai/chatterbox.git
 python3 .agents/skills/rtx-blackwell-voice-clone/scripts/patch_chatterbox_rtx.py chatterbox
-pip install -e chatterbox
+uv pip install --python .venv/bin/python -e chatterbox
 ```
 *(The patch file is located at [resources/chatterbox_rtx_blackwell.patch](./resources/chatterbox_rtx_blackwell.patch))*
-
-### Step 4: Install Audio Processing Dependencies
-```bash
-pip install soundfile librosa huggingface_hub transformers diffusers pyloudnorm
-```
 
 ---
 

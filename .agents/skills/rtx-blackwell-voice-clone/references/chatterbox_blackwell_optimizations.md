@@ -89,3 +89,24 @@ torch.backends.cudnn.allow_tf32 = True
 converts float32 matrix multiplications into 19-bit TF32 operations on Tensor Cores (8-bit exponent, 10-bit mantissa).
 This delivers **3x faster convolution and linear projection passes** with zero discernible loss in speech quality.
 
+---
+
+## 5. Self-Bootstrapping Virtual Environment Execution
+
+On developer workstations, running CLI scripts with system Python (`/usr/bin/python3`) often fails due to missing dependencies (`numpy`, `torch`).
+The CLI synthesizer (`chatterbox_clone_rtx.py`) implements upward discovery:
+```python
+def _find_venv() -> Path | None:
+    cwd_venv = Path.cwd() / ".venv"
+    if (cwd_venv / "bin" / "python3").exists():
+        return cwd_venv
+    curr = Path(__file__).resolve().parent
+    for _ in range(6):
+        candidate = curr / ".venv"
+        if (candidate / "bin" / "python3").exists():
+            return candidate
+        curr = curr.parent
+    return None
+```
+When invoked from an unactivated terminal shell, the script transparently re-executes itself via `os.execv()` with `.venv/bin/python3`, guaranteeing that all PyTorch, CUDA, and Chatterbox dependencies are correctly bound.
+

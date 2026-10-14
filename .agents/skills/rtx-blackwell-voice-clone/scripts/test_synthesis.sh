@@ -53,6 +53,14 @@ try:
     print(f"✓ Compute Capability: {cap[0]}.{cap[1]} (sm_{cap[0]}{cap[1]})")
     print(f"✓ Dedicated VRAM: {vram:.2f} GB")
     
+    # Verify sm_120 in arch list
+    arch_list = torch.cuda.get_arch_list()
+    if f"sm_{cap[0]}{cap[1]}" not in arch_list and f"compute_{cap[0]}{cap[1]}" not in arch_list:
+        print(f"⚠️ Warning: Device architecture sm_{cap[0]}{cap[1]} not found in PyTorch arch list: {arch_list}")
+        print("  Please update to CUDA 12.8+ wheels: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128")
+    else:
+        print(f"✓ Binary Kernel Architecture: sm_{cap[0]}{cap[1]} compiled & available")
+
     # Test TensorFloat-32 and BF16
     torch.backends.cuda.matmul.allow_tf32 = True
     print(f"✓ TensorFloat-32 (TF32): Supported & Enabled")
@@ -61,7 +69,7 @@ try:
     print(f"✓ BFloat16 Tensor Operation: Success on CUDA")
 except ImportError:
     print("⚠️ PyTorch not yet installed in current Python environment.")
-    print("  To install: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124")
+    print("  To install: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128")
 EOF
 
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"

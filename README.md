@@ -31,16 +31,16 @@ Zero-shot, 100% offline voice cloning and text-to-speech synthesis using [Resemb
 
 ### 2. Setup Environment
 ```bash
-# Create venv and install PyTorch with CUDA
-python3 -m venv .venv
+# Create venv and install PyTorch with CUDA 12.8+ (native sm_120 Blackwell support)
+uv venv .venv --python 3.12
 source .venv/bin/activate
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install soundfile librosa huggingface_hub transformers diffusers pyloudnorm
+uv pip install --python .venv/bin/python torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python .venv/bin/python pip soundfile librosa huggingface_hub transformers diffusers pyloudnorm numpy
 
 # Clone and patch Chatterbox for RTX Blackwell
 git clone https://github.com/resemble-ai/chatterbox.git
 python3 .agents/skills/rtx-blackwell-voice-clone/scripts/patch_chatterbox_rtx.py chatterbox
-pip install -e chatterbox
+uv pip install --python .venv/bin/python -e chatterbox
 ```
 
 ### 3. Synthesize Speech

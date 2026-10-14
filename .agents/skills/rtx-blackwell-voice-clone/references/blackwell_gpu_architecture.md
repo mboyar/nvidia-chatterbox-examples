@@ -76,3 +76,25 @@ In Windows Subsystem for Linux 2 (WSL2):
 - **Audio Output**:
   Audio generated inside WSL2 can be listened to directly through WSLg PulseAudio devices (`paplay`, `aplay`), or played on the Windows host using PowerShell (`powershell.exe -c "(New-Object Media.SoundPlayer 'path.wav').PlaySync()"`).
 
+---
+
+## 5. PyTorch Binary Architecture Compatibility (`cu128` / `sm_120`)
+
+When deploying deep learning models on Blackwell GPUs (`sm_120`):
+- Earlier PyTorch releases compiled with CUDA 12.1 or 12.4 only package SASS binary kernels up to Compute Capability 9.0 (`sm_90`, Hopper).
+- Running operations on Blackwell hardware with an outdated wheel produces:
+  ```text
+  UserWarning: NVIDIA RTX PRO 2000 Blackwell Generation Laptop GPU with CUDA capability sm_120 is not compatible with the current PyTorch installation.
+  The current PyTorch install supports CUDA capabilities sm_50 sm_60 sm_70 sm_75 sm_80 sm_86 sm_90.
+  RuntimeError: CUDA error: no kernel image is available for execution on the device
+  ```
+- **Resolution**: Use official PyTorch wheels built with **CUDA 12.8+ (`cu128`)**:
+  ```bash
+  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+  ```
+- Verify compilation targets via Python:
+  ```python
+  import torch
+  assert "sm_120" in torch.cuda.get_arch_list(), "sm_120 missing from PyTorch build!"
+  ```
+
