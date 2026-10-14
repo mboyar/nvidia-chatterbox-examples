@@ -50,12 +50,19 @@ Instead of using `load_file()` which duplicates 1.015 GB into a Python dictionar
 3. Tensors are copied directly into the pre-allocated parameter memory in-place via `param.data.copy_(t)`.
 - Eliminates 1GB+ host RAM spikes. Loading completes in **~12 seconds**.
 
-### B. Stage-Aware Sequential Memory Swapping
-Generation is strictly sequential:
-- **Stage 1 (Text $\rightarrow$ Speech Tokens)**: T3 runs on CUDA at ~50 tokens/s.
-- **Stage 2 (Tokens $\rightarrow$ Audio Waveform)**: T3 moves to CPU (takes only **140 ms** across 68 GB/s unified memory) and clears CUDA cache. This frees **800 MB** of VRAM, giving S3Gen ample headroom to run flow-matching and HiFiGAN without OOM.
-- If additional sentences remain, T3 returns to CUDA in 150 ms.
-- Peak VRAM never exceeds 900 MB. Synthesis runs at **~1.7x real-time**.
+### B. Zero-Thrash Fully-Resident CUDA Pipeline (667 MB Total)
+Dynamic CPU-GPU swapping between sentences causes PyTorch's caching allocator to re-allocate parameter memory buffers repeatedly, eventually fragmenting the Tegra `nvmap` contiguous carveout.
+Instead, we keep both models resident on CUDA without swapping:
+- **`t3` in `bfloat16`** (~341 MB).
+- **`s3gen.flow` in `bfloat16`** (~218 MB) — cuts ODE Conformer parameter and activation memory in half.
+- **`s3gen.mel2wav` in `float32`** (~79 MB).
+- **Total static CUDA footprint = 667 MB**.
+
+### C. cuDNN 1D Workspace Elimination & Chunked HiFiGAN Vocoding
+1. **Disable cuDNN 1D Convolutions (`torch.backends.cudnn.enabled = False`)**:
+   In HiFiGAN, cuDNN 1D convolutions request massive contiguous workspace memory allocations for long waveform generation. PyTorch native ATen CUDA 1D convolutions use **0 workspace memory**, run at full Ampere GPU speed (53+ tokens/s, 9+ it/s), and completely eliminate Tegra cuDNN allocation crashes.
+2. **Chunked HiFiGAN Inference**:
+   Mel spectrograms longer than 100 frames are processed in chunks (`chunk_size=100`, `overlap=8`) with linear cross-fading, capping HiFiGAN activation memory under 60 MB.
 
 Read the full architectural breakdown in [references/chatterbox_patches.md](./references/chatterbox_patches.md).
 

@@ -18,7 +18,7 @@ index 381ed77..73f2a8b 100644
      "diffusers==0.29.0",
      "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@master",
 diff --git a/src/chatterbox/models/s3gen/s3gen.py b/src/chatterbox/models/s3gen/s3gen.py
-index 1207616..61367bd 100644
+index 1207616..d9b6580 100644
 --- a/src/chatterbox/models/s3gen/s3gen.py
 +++ b/src/chatterbox/models/s3gen/s3gen.py
 @@ -107,7 +107,7 @@ class S3Token2Mel(torch.nn.Module):
@@ -30,15 +30,27 @@ index 1207616..61367bd 100644
          return next(params).device
  
      @property
-@@ -149,10 +149,14 @@ class S3Token2Mel(torch.nn.Module):
+@@ -138,9 +138,8 @@ class S3Token2Mel(torch.nn.Module):
+         ref_wav_24 = ref_wav
+         if ref_sr != S3GEN_SR:
+             ref_wav_24 = get_resampler(ref_sr, S3GEN_SR, device)(ref_wav)
+-        ref_wav_24 = ref_wav_24.to(device=device, dtype=self.dtype)
+ 
+-        ref_mels_24 = self.mel_extractor(ref_wav_24).transpose(1, 2).to(dtype=self.dtype)
++        ref_mels_24 = self.mel_extractor(ref_wav_24.float().to(device)).transpose(1, 2).to(dtype=self.dtype)
+         ref_mels_24_len = None
+ 
+         # Resample to 16kHz
+@@ -149,10 +148,15 @@ class S3Token2Mel(torch.nn.Module):
              ref_wav_16 = get_resampler(ref_sr, S3_SR, device)(ref_wav)
  
          # Speaker embedding
 -        ref_x_vector = self.speaker_encoder.inference(ref_wav_16.to(dtype=self.dtype))
 +        spk_dev = next(self.speaker_encoder.parameters()).device
-+        ref_x_vector = self.speaker_encoder.inference(ref_wav_16.to(device=spk_dev, dtype=self.dtype))
++        spk_dtype = next(self.speaker_encoder.parameters()).dtype
++        ref_x_vector = self.speaker_encoder.inference(ref_wav_16.to(device=spk_dev, dtype=spk_dtype))
 +        if torch.is_tensor(ref_x_vector):
-+            ref_x_vector = ref_x_vector.to(device)
++            ref_x_vector = ref_x_vector.to(device=device, dtype=self.dtype)
  
          # Tokenize 16khz reference
 -        ref_speech_tokens, ref_speech_token_lens = self.tokenizer(ref_wav_16.float())
@@ -47,6 +59,205 @@ index 1207616..61367bd 100644
  
          # Make sure mel_len = 2 * stoken_len (happens when the input is not padded to multiple of 40ms)
          if ref_mels_24.shape[1] != 2 * ref_speech_tokens.shape[1]:
+@@ -209,7 +213,8 @@ class S3Token2Mel(torch.nn.Module):
+                 if isinstance(ref_dict[rk], np.ndarray):
+                     ref_dict[rk] = torch.from_numpy(ref_dict[rk])
+                 if torch.is_tensor(ref_dict[rk]):
+-                    ref_dict[rk] = ref_dict[rk].to(device=self.device, dtype=self.dtype)
++                    target_dtype = self.dtype if ref_dict[rk].is_floating_point() else None
++                    ref_dict[rk] = ref_dict[rk].to(device=self.device, dtype=target_dtype)
+ 
+         speech_tokens = torch.atleast_2d(speech_tokens)
+ 
+@@ -322,9 +327,50 @@ class S3Token2Wav(S3Token2Mel):
+ 
+     @torch.inference_mode()
+     def hift_inference(self, speech_feat, cache_source: torch.Tensor = None):
++        speech_feat = speech_feat.float()
++        mel2wav_dtype = next(self.mel2wav.parameters()).dtype
+         if cache_source is None:
+-            cache_source = torch.zeros(1, 1, 0).to(device=self.device, dtype=self.dtype)
+-        return self.mel2wav.inference(speech_feat=speech_feat, cache_source=cache_source)
++            cache_source = torch.zeros(1, 1, 0, device=self.device, dtype=mel2wav_dtype)
++        else:
++            cache_source = cache_source.to(dtype=mel2wav_dtype)
++
++        T = speech_feat.size(-1)
++        chunk_size = 100
++        overlap = 8
++        if T <= chunk_size:
++            return self.mel2wav.inference(speech_feat=speech_feat, cache_source=cache_source)
++
++        hop_size = 256
++        stride = chunk_size - overlap
++        wav_parts = []
++        pos = 0
++
++        while pos < T:
++            end = min(pos + chunk_size, T)
++            mel_chunk = speech_feat[:, :, pos:end]
++            wav_chunk, _ = self.mel2wav.inference(speech_feat=mel_chunk, cache_source=cache_source)
++            wav_parts.append((pos, end, wav_chunk))
++            if end == T:
++                break
++            pos += stride
++            if torch.cuda.is_available():
++                torch.cuda.empty_cache()
++
++        total_samples = T * hop_size
++        final_wav = torch.zeros(1, total_samples, device=self.device, dtype=speech_feat.dtype)
++        weights = torch.zeros(1, total_samples, device=self.device, dtype=speech_feat.dtype)
++
++        for pos, end, w in wav_parts:
++            start_samp = pos * hop_size
++            end_samp = start_samp + w.size(-1)
++            if end_samp > total_samples:
++                w = w[:, :total_samples - start_samp]
++                end_samp = total_samples
++            final_wav[:, start_samp:end_samp] += w
++            weights[:, start_samp:end_samp] += 1.0
++
++        final_wav /= torch.clamp(weights, min=1e-6)
++        return final_wav, None
+ 
+     @torch.inference_mode()
+     def inference(
+@@ -353,7 +399,8 @@ class S3Token2Wav(S3Token2Mel):
+             n_cfm_timesteps=n_cfm_timesteps,
+             finalize=True,
+         )
+-        output_mels = output_mels.to(dtype=self.dtype) # FIXME (fp16 mode) is this still needed?
++        if torch.cuda.is_available():
++            torch.cuda.empty_cache()
+         output_wavs, output_sources = self.hift_inference(output_mels, None)
+ 
+         # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
+diff --git a/src/chatterbox/models/s3gen/transformer/attention.py b/src/chatterbox/models/s3gen/transformer/attention.py
+index 95e1d84..4dada69 100644
+--- a/src/chatterbox/models/s3gen/transformer/attention.py
++++ b/src/chatterbox/models/s3gen/transformer/attention.py
+@@ -21,6 +21,7 @@ from typing import Tuple
+ 
+ import torch
+ from torch import nn
++import torch.nn.functional as F
+ 
+ 
+ class MultiHeadedAttention(nn.Module):
+@@ -107,19 +108,20 @@ class MultiHeadedAttention(nn.Module):
+         #   2. pytorch training
+         if mask.size(2) > 0:  # time2 > 0
+             mask = mask.unsqueeze(1).eq(0)  # (batch, 1, *, time2)
+-            # For last chunk, time2 might be larger than scores.size(-1)
+             mask = mask[:, :, :, :scores.size(-1)]  # (batch, 1, *, time2)
+             scores = scores.masked_fill(mask, -float('inf'))
+-            attn = torch.softmax(scores, dim=-1).masked_fill(
+-                mask, 0.0)  # (batch, head, time1, time2)
+-        # NOTE(xcsong): When will `if mask.size(2) > 0` be False?
+-        #   1. onnx(16/-1, -1/-1, 16/0)
+-        #   2. jit (16/-1, -1/-1, 16/0, 16/4)
++            attn = torch.softmax(scores, dim=-1)
++            del scores
++            attn = attn.masked_fill(mask, 0.0)
++            del mask
+         else:
+-            attn = torch.softmax(scores, dim=-1)  # (batch, head, time1, time2)
++            attn = torch.softmax(scores, dim=-1)
++            del scores
+ 
+         p_attn = self.dropout(attn)
++        del attn
+         x = torch.matmul(p_attn, value)  # (batch, head, time1, d_k)
++        del p_attn
+         x = (x.transpose(1, 2).contiguous().view(n_batch, -1,
+                                                  self.h * self.d_k)
+              )  # (batch, time1, d_model)
+@@ -233,11 +235,7 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
+             torch.Tensor: Output tensor.
+ 
+         """
+-        zero_pad = torch.zeros((x.size()[0], x.size()[1], x.size()[2], 1),
+-                               device=x.device,
+-                               dtype=x.dtype)
+-        x_padded = torch.cat([zero_pad, x], dim=-1)
+-
++        x_padded = F.pad(x, (1, 0))
+         x_padded = x_padded.view(x.size()[0],
+                                  x.size()[1],
+                                  x.size(3) + 1, x.size(2))
+@@ -324,7 +322,9 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
+         if matrix_ac.shape != matrix_bd.shape:
+             matrix_bd = self.rel_shift(matrix_bd)
+ 
+-        scores = (matrix_ac + matrix_bd) / math.sqrt(
+-            self.d_k)  # (batch, head, time1, time2)
++        matrix_ac.add_(matrix_bd)
++        del matrix_bd
++        matrix_ac.div_(math.sqrt(self.d_k))
++        scores = matrix_ac
+ 
+         return self.forward_attention(v, scores, mask), new_cache
+diff --git a/src/chatterbox/models/s3gen/transformer/embedding.py b/src/chatterbox/models/s3gen/transformer/embedding.py
+index eae8c8e..2c0df86 100644
+--- a/src/chatterbox/models/s3gen/transformer/embedding.py
++++ b/src/chatterbox/models/s3gen/transformer/embedding.py
+@@ -46,15 +46,15 @@ class PositionalEncoding(torch.nn.Module):
+         self.dropout = torch.nn.Dropout(p=dropout_rate)
+         self.max_len = max_len
+ 
+-        self.pe = torch.zeros(self.max_len, self.d_model)
++        pe = torch.zeros(self.max_len, self.d_model)
+         position = torch.arange(0, self.max_len,
+                                 dtype=torch.float32).unsqueeze(1)
+         div_term = torch.exp(
+             torch.arange(0, self.d_model, 2, dtype=torch.float32) *
+             -(math.log(10000.0) / self.d_model))
+-        self.pe[:, 0::2] = torch.sin(position * div_term)
+-        self.pe[:, 1::2] = torch.cos(position * div_term)
+-        self.pe = self.pe.unsqueeze(0)
++        pe[:, 0::2] = torch.sin(position * div_term)
++        pe[:, 1::2] = torch.cos(position * div_term)
++        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
+ 
+     def forward(self,
+                 x: torch.Tensor,
+@@ -71,7 +71,8 @@ class PositionalEncoding(torch.nn.Module):
+             torch.Tensor: for compatibility to RelPositionalEncoding
+         """
+ 
+-        self.pe = self.pe.to(x.device)
++        if self.pe.device != x.device:
++            self.register_buffer("pe", self.pe.to(x.device), persistent=False)
+         pos_emb = self.position_encoding(offset, x.size(1), False)
+         x = x * self.xscale + pos_emb
+         return self.dropout(x), self.dropout(pos_emb)
+@@ -218,7 +219,7 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
+         self.d_model = d_model
+         self.xscale = math.sqrt(self.d_model)
+         self.dropout = torch.nn.Dropout(p=dropout_rate)
+-        self.pe = None
++        self.register_buffer("pe", None, persistent=False)
+         self.extend_pe(torch.tensor(0.0).expand(1, max_len))
+ 
+     def extend_pe(self, x: torch.Tensor):
+@@ -228,7 +229,7 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
+             # the length of self.pe is 2 * input_len - 1
+             if self.pe.size(1) >= x.size(1) * 2 - 1:
+                 if self.pe.dtype != x.dtype or self.pe.device != x.device:
+-                    self.pe = self.pe.to(dtype=x.dtype, device=x.device)
++                    self.register_buffer("pe", self.pe.to(dtype=x.dtype, device=x.device), persistent=False)
+                 return
+         # Suppose `i` means to the position of query vecotr and `j` means the
+         # position of key vector. We use position relative positions when keys
+@@ -251,7 +252,7 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
+         pe_positive = torch.flip(pe_positive, [0]).unsqueeze(0)
+         pe_negative = pe_negative[1:].unsqueeze(0)
+         pe = torch.cat([pe_positive, pe_negative], dim=1)
+-        self.pe = pe.to(device=x.device, dtype=x.dtype)
++        self.register_buffer("pe", pe.to(device=x.device, dtype=x.dtype), persistent=False)
+ 
+     def forward(self, x: torch.Tensor, offset: Union[int, torch.Tensor] = 0) \
+             -> Tuple[torch.Tensor, torch.Tensor]:
 diff --git a/src/chatterbox/models/s3gen/xvector.py b/src/chatterbox/models/s3gen/xvector.py
 index 6eb99af..7720e2e 100644
 --- a/src/chatterbox/models/s3gen/xvector.py
@@ -117,7 +328,7 @@ index b5f15c6..1c5b137 100644
          # Concat and return
          cond_embeds = torch.cat((
 diff --git a/src/chatterbox/models/t3/t3.py b/src/chatterbox/models/t3/t3.py
-index d83de26..e7f6140 100644
+index d83de26..f334cb6 100644
 --- a/src/chatterbox/models/t3/t3.py
 +++ b/src/chatterbox/models/t3/t3.py
 @@ -89,6 +89,10 @@ class T3(nn.Module):
@@ -131,17 +342,55 @@ index d83de26..e7f6140 100644
      def prepare_conditioning(self, t3_cond: T3Cond):
          """
          Token cond data needs to be embedded, so that needs to be here instead of in `T3CondEnc`.
+@@ -418,12 +422,14 @@ class T3(nn.Module):
+             inputs_embeds=embeds,
+             use_cache=True
+         )
++        del embeds
+ 
+         hidden_states = llm_outputs[0]
+         past_key_values = llm_outputs.past_key_values
+ 
+         speech_hidden = hidden_states[:, -1:]
+         speech_logits = self.speech_head(speech_hidden)
++        del hidden_states, llm_outputs
+ 
+         processed_logits = logits_processors(speech_start_token, speech_logits[:, -1, :])
+         probs = F.softmax(processed_logits, dim=-1)
+@@ -444,6 +450,7 @@ class T3(nn.Module):
+             hidden_states = llm_outputs[0]
+             past_key_values = llm_outputs.past_key_values
+             speech_logits = self.speech_head(hidden_states)
++            del hidden_states, llm_outputs
+ 
+             input_ids = torch.cat(generated_speech_tokens, dim=1)
+             processed_logits = logits_processors(input_ids, speech_logits[:, -1, :])
+@@ -460,6 +467,11 @@ class T3(nn.Module):
+                 break
+ 
+         all_tokens = torch.cat(generated_speech_tokens, dim=1)
++        del past_key_values, generated_speech_tokens, current_speech_token
++        import gc
++        gc.collect()
++        if self.device.type != "cpu":
++            torch.cuda.empty_cache()
+ 
+         # Remove EOS token if present
+         if all_tokens.size(1) > 0 and all_tokens[0, -1] == self.hp.stop_speech_token:
 diff --git a/src/chatterbox/tts_turbo.py b/src/chatterbox/tts_turbo.py
-index e708f0c..118f0d9 100644
+index e708f0c..906fbdf 100644
 --- a/src/chatterbox/tts_turbo.py
 +++ b/src/chatterbox/tts_turbo.py
-@@ -1,4 +1,5 @@
+@@ -1,14 +1,16 @@
  import os
 +os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
  import math
  from dataclasses import dataclass
  from pathlib import Path
-@@ -8,7 +9,7 @@ import torch
+ 
+ import librosa
+ import torch
++torch.backends.cudnn.enabled = False
  import perth
  import pyloudnorm as ln
  
@@ -150,7 +399,7 @@ index e708f0c..118f0d9 100644
  from huggingface_hub import snapshot_download
  from transformers import AutoTokenizer
  
-@@ -86,8 +87,8 @@ class Conditionals:
+@@ -86,8 +88,8 @@ class Conditionals:
      t3: T3Cond
      gen: dict
  
@@ -161,7 +410,16 @@ index e708f0c..118f0d9 100644
          for k, v in self.gen.items():
              if torch.is_tensor(v):
                  self.gen[k] = v.to(device=device)
-@@ -146,7 +147,7 @@ class ChatterboxTurboTTS:
+@@ -110,7 +112,7 @@ class Conditionals:
+ 
+ class ChatterboxTurboTTS:
+     ENC_COND_LEN = 15 * S3_SR
+-    DEC_COND_LEN = 10 * S3GEN_SR
++    DEC_COND_LEN = 6 * S3GEN_SR
+ 
+     def __init__(
+         self,
+@@ -146,7 +148,7 @@ class ChatterboxTurboTTS:
          ve.load_state_dict(
              load_file(ckpt_dir / "ve.safetensors")
          )
@@ -170,7 +428,7 @@ index e708f0c..118f0d9 100644
  
          # Turbo/Nano share the same architecture; Nano just uses a smaller
          # GPT2 backbone and its own T3 checkpoint.
-@@ -163,16 +164,44 @@ class ChatterboxTurboTTS:
+@@ -163,16 +165,52 @@ class ChatterboxTurboTTS:
          t3_state = load_file(ckpt_dir / t3_ckpt)
          if "model" in t3_state.keys():
              t3_state = t3_state["model"][0]
@@ -197,6 +455,8 @@ index e708f0c..118f0d9 100644
 -        s3gen.to(device).eval()
 +        # Move target submodules to device first so their buffers are pre-allocated
 +        s3gen.speaker_encoder.eval()
++        if use_bf16:
++            s3gen.flow.to(torch.bfloat16)
 +        s3gen.flow.to(device).eval()
 +        s3gen.mel2wav.to(device).eval()
 +        s3gen.trim_fade = s3gen.trim_fade.to(device)
@@ -209,9 +469,15 @@ index e708f0c..118f0d9 100644
 +            for k in sf.keys():
 +                t = sf.get_tensor(k)
 +                if k in params:
-+                    params[k].data.copy_(t)
++                    if params[k].dtype == torch.bfloat16 and t.is_floating_point():
++                        params[k].data.copy_(t.to(torch.bfloat16))
++                    else:
++                        params[k].data.copy_(t)
 +                elif k in buffers:
-+                    buffers[k].data.copy_(t)
++                    if buffers[k].dtype == torch.bfloat16 and t.is_floating_point():
++                        buffers[k].data.copy_(t.to(torch.bfloat16))
++                    else:
++                        buffers[k].data.copy_(t)
 +                del t
 +        del params, buffers
 +        gc.collect()
@@ -220,7 +486,7 @@ index e708f0c..118f0d9 100644
  
          tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
          if tokenizer.pad_token is None:
-@@ -183,7 +212,7 @@ class ChatterboxTurboTTS:
+@@ -183,7 +221,7 @@ class ChatterboxTurboTTS:
          conds = None
          builtin_voice = ckpt_dir / "conds.pt"
          if builtin_voice.exists():
@@ -229,7 +495,7 @@ index e708f0c..118f0d9 100644
  
          return cls(t3, s3gen, ve, tokenizer, device, conds=conds,
                     model_label="Nano" if nano else "Turbo")
-@@ -260,13 +289,13 @@ class ChatterboxTurboTTS:
+@@ -260,15 +298,21 @@ class ChatterboxTurboTTS:
  
          # Voice-encoder speaker embedding
          ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
@@ -245,31 +511,36 @@ index e708f0c..118f0d9 100644
 +        ).to(device=self.device, dtype=self.t3.dtype)
          self.conds = Conditionals(t3_cond, s3gen_ref_dict)
  
++        del s3gen_ref_wav, ref_16k_wav
++        import gc
++        gc.collect()
++        if self.device != "cpu":
++            torch.cuda.empty_cache()
++
      def generate(
-@@ -295,6 +324,10 @@ class ChatterboxTurboTTS:
+         self,
+         text,
+@@ -295,6 +339,9 @@ class ChatterboxTurboTTS:
          text_tokens = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
          text_tokens = text_tokens.input_ids.to(self.device)
  
-+        # Ensure T3 is on device for token generation
-+        if self.device != "cpu" and next(self.t3.parameters()).device.type != "cuda":
-+            self.t3.to(self.device)
++        if self.device != "cpu":
++            torch.cuda.empty_cache()
 +
          speech_tokens = self.t3.inference_turbo(
              t3_cond=self.conds.t3,
              text_tokens=text_tokens,
-@@ -304,6 +337,11 @@ class ChatterboxTurboTTS:
+@@ -304,6 +351,9 @@ class ChatterboxTurboTTS:
              repetition_penalty=repetition_penalty,
          )
  
-+        # Move T3 to CPU to free 800MB of GPU memory for S3Gen vocoder
 +        if self.device != "cpu":
-+            self.t3.to("cpu")
 +            torch.cuda.empty_cache()
 +
          # Remove OOV tokens and add silence to end
          speech_tokens = speech_tokens[speech_tokens < 6561]
          speech_tokens = speech_tokens.to(self.device)
-@@ -315,6 +353,9 @@ class ChatterboxTurboTTS:
+@@ -315,6 +365,9 @@ class ChatterboxTurboTTS:
              ref_dict=self.conds.gen,
              n_cfm_timesteps=2,
          )

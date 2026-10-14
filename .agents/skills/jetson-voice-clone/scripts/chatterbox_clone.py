@@ -10,11 +10,19 @@ from pathlib import Path
 
 # 1. Automatically re-exec into project's .venv if running with system python
 _script_dir = Path(__file__).resolve().parent
-_venv_dir = _script_dir / ".venv"
-_venv_python = _venv_dir / "bin" / "python3"
-if _venv_python.exists() and Path(sys.prefix).resolve() != _venv_dir.resolve():
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
+_candidate_venvs = [
+    Path.cwd() / ".venv",
+    _script_dir / ".venv",
+    _script_dir.parents[3] / ".venv" if len(_script_dir.parents) >= 4 else None,
+    Path("/home/mboyar/.gemini/antigravity/scratch/chatterbox_voice_clone/.venv"),
+]
+for _candidate in _candidate_venvs:
+    if _candidate and _candidate.exists():
+        _venv_python = _candidate / "bin" / "python3"
+        if _venv_python.exists() and Path(sys.prefix).resolve() != _candidate.resolve():
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+            os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
+        break
 
 # 2. Configure PyTorch unified memory allocator before importing torch
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -67,8 +75,8 @@ class _StderrFilter:
         except Exception:
             pass
 
-_stderr_filter = _StderrFilter()
-atexit.register(_stderr_filter.close)
+# _stderr_filter = _StderrFilter()
+# atexit.register(_stderr_filter.close)
 
 import argparse
 import re
@@ -77,6 +85,7 @@ import time
 import numpy as np
 import soundfile as sf
 import torch
+torch.backends.cudnn.enabled = False
 
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
@@ -98,12 +107,27 @@ def split_into_sentences(text: str) -> list[str]:
             s = s.strip()
             if not s:
                 continue
-            # If a single chunk is excessively long (>250 chars), further subdivide on semicolons or commas
-            if len(s) > 250:
-                sub_parts = re.split(r'(?<=[,;])\s+', s)
+            # If a single chunk is long (>140 chars), subdivide on clause boundaries (, ; — :)
+            # for natural prosody and bounded memory footprint
+            if len(s) > 140:
+                sub_parts = re.split(r'(?<=[,;—–:])\s+', s)
                 accum = ""
                 for part in sub_parts:
-                    if len(accum) + len(part) < 220:
+                    if len(part) > 140:
+                        words = part.split()
+                        w_accum = ""
+                        for w in words:
+                            if len(w_accum) + len(w) + 1 < 120:
+                                w_accum = f"{w_accum} {w}".strip()
+                            else:
+                                if w_accum:
+                                    if accum:
+                                        chunks.append(accum)
+                                        accum = ""
+                                    chunks.append(w_accum)
+                                w_accum = w
+                        part = w_accum
+                    if len(accum) + len(part) < 130:
                         accum = f"{accum} {part}".strip()
                     else:
                         if accum:
@@ -229,6 +253,11 @@ def main():
         chunk_time = time.time() - t_chunk
         total_gen_time += chunk_time
         wav_np = wav.squeeze(0).numpy()
+        del wav
+        import gc
+        gc.collect()
+        if args.device == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
         audio_chunks.append(wav_np)
         if idx < len(sentences):
             audio_chunks.append(silence_gap)

@@ -25,10 +25,15 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv
 .venv/
+venv
 venv/
 ENV/
 env/
+
+# Root CLI symlink
+/chatterbox_clone.py
 
 # Locally cloned repositories
 chatterbox/
