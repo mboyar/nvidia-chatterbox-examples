@@ -1,0 +1,281 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 381ed77..73f2a8b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,11 +14,9 @@ dependencies = [
+     "numpy>=2.0.0; python_version >= '3.13'",
+     "librosa==0.11.0",
+     "s3tokenizer",
+-    # torch 2.6.0 supports Python 3.10-3.13; Python 3.14 needs 2.9.0+
+-    "torch==2.6.0; python_version < '3.14'",
+-    "torch>=2.9.0; python_version >= '3.14'",
+-    "torchaudio==2.6.0; python_version < '3.14'",
+-    "torchaudio>=2.9.0; python_version >= '3.14'",
++    # torch/torchaudio installed with CUDA support for Jetson JetPack 6
++    "torch>=2.5.0",
++    "torchaudio>=2.5.0",
+     "transformers==5.2.0",
+     "diffusers==0.29.0",
+     "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@master",
+diff --git a/src/chatterbox/models/s3gen/s3gen.py b/src/chatterbox/models/s3gen/s3gen.py
+index 1207616..61367bd 100644
+--- a/src/chatterbox/models/s3gen/s3gen.py
++++ b/src/chatterbox/models/s3gen/s3gen.py
+@@ -107,7 +107,7 @@ class S3Token2Mel(torch.nn.Module):
+ 
+     @property
+     def device(self):
+-        params = self.tokenizer.parameters()
++        params = self.flow.parameters()
+         return next(params).device
+ 
+     @property
+@@ -149,10 +149,14 @@ class S3Token2Mel(torch.nn.Module):
+             ref_wav_16 = get_resampler(ref_sr, S3_SR, device)(ref_wav)
+ 
+         # Speaker embedding
+-        ref_x_vector = self.speaker_encoder.inference(ref_wav_16.to(dtype=self.dtype))
++        spk_dev = next(self.speaker_encoder.parameters()).device
++        ref_x_vector = self.speaker_encoder.inference(ref_wav_16.to(device=spk_dev, dtype=self.dtype))
++        if torch.is_tensor(ref_x_vector):
++            ref_x_vector = ref_x_vector.to(device)
+ 
+         # Tokenize 16khz reference
+-        ref_speech_tokens, ref_speech_token_lens = self.tokenizer(ref_wav_16.float())
++        tok_device = next(self.tokenizer.parameters()).device
++        ref_speech_tokens, ref_speech_token_lens = self.tokenizer(ref_wav_16.float().to(tok_device))
+ 
+         # Make sure mel_len = 2 * stoken_len (happens when the input is not padded to multiple of 40ms)
+         if ref_mels_24.shape[1] != 2 * ref_speech_tokens.shape[1]:
+diff --git a/src/chatterbox/models/s3gen/xvector.py b/src/chatterbox/models/s3gen/xvector.py
+index 6eb99af..7720e2e 100644
+--- a/src/chatterbox/models/s3gen/xvector.py
++++ b/src/chatterbox/models/s3gen/xvector.py
+@@ -424,5 +424,5 @@ class CAMPPlus(torch.nn.Module):
+ 
+     def inference(self, audio_list):
+         speech, speech_lengths, speech_times = extract_feature(audio_list)
+-        results = self.forward(speech.to(torch.float32))
++        results = self.forward(speech.to(next(self.parameters()).dtype))
+         return results
+diff --git a/src/chatterbox/models/s3tokenizer/s3tokenizer.py b/src/chatterbox/models/s3tokenizer/s3tokenizer.py
+index 8648608..5a6b4db 100644
+--- a/src/chatterbox/models/s3tokenizer/s3tokenizer.py
++++ b/src/chatterbox/models/s3tokenizer/s3tokenizer.py
+@@ -155,12 +155,12 @@ class S3Tokenizer(S3TokenizerV2):
+             audio = F.pad(audio, (0, padding))
+         stft = torch.stft(
+             audio, self.n_fft, S3_HOP,
+-            window=self.window.to(self.device),
++            window=self.window.to(device=audio.device, dtype=audio.dtype),
+             return_complex=True
+         )
+         magnitudes = stft[..., :-1].abs()**2
+ 
+-        mel_spec = self._mel_filters.to(self.device) @ magnitudes
++        mel_spec = self._mel_filters.to(device=magnitudes.device, dtype=magnitudes.dtype) @ magnitudes
+ 
+         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+         log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+diff --git a/src/chatterbox/models/t3/modules/cond_enc.py b/src/chatterbox/models/t3/modules/cond_enc.py
+index b5f15c6..1c5b137 100644
+--- a/src/chatterbox/models/t3/modules/cond_enc.py
++++ b/src/chatterbox/models/t3/modules/cond_enc.py
+@@ -25,8 +25,8 @@ class T3Cond:
+         "Cast to a device and dtype. Dtype casting is ignored for long/int tensors."
+         for k, v in self.__dict__.items():
+             if torch.is_tensor(v):
+-                is_fp = type(v.view(-1)[0].item()) is not int
+-                setattr(self, k, v.to(device=device, dtype=dtype if is_fp else None))
++                target_dtype = dtype if (dtype is not None and v.is_floating_point()) else v.dtype
++                setattr(self, k, v.to(device=device, dtype=target_dtype))
+         return self
+ 
+     def save(self, fpath):
+@@ -67,7 +67,10 @@ class T3CondEnc(nn.Module):
+             "no embeddings for cond_prompt_speech_tokens"
+ 
+         # Speaker embedding projection
+-        cond_spkr = self.spkr_enc(cond.speaker_emb.view(-1, self.hp.speaker_embed_size))[:, None]  # (B, 1, dim)
++        speaker_emb = cond.speaker_emb
++        if speaker_emb.dtype != self.spkr_enc.weight.dtype:
++            speaker_emb = speaker_emb.to(self.spkr_enc.weight.dtype)
++        cond_spkr = self.spkr_enc(speaker_emb.view(-1, self.hp.speaker_embed_size))[:, None]  # (B, 1, dim)
+         empty = torch.zeros_like(cond_spkr[:, :0])  # (B, 0, dim)
+ 
+         # TODO CLAP
+@@ -85,7 +88,10 @@ class T3CondEnc(nn.Module):
+         cond_emotion_adv = empty  # (B, 0, dim)
+         if self.hp.emotion_adv:
+             assert cond.emotion_adv is not None
+-            cond_emotion_adv = self.emotion_adv_fc(cond.emotion_adv.view(-1, 1, 1))
++            emotion_adv = cond.emotion_adv
++            if self.emotion_adv_fc is not None and emotion_adv.dtype != self.emotion_adv_fc.weight.dtype:
++                emotion_adv = emotion_adv.to(self.emotion_adv_fc.weight.dtype)
++            cond_emotion_adv = self.emotion_adv_fc(emotion_adv.view(-1, 1, 1))
+ 
+         # Concat and return
+         cond_embeds = torch.cat((
+diff --git a/src/chatterbox/models/t3/t3.py b/src/chatterbox/models/t3/t3.py
+index d83de26..e7f6140 100644
+--- a/src/chatterbox/models/t3/t3.py
++++ b/src/chatterbox/models/t3/t3.py
+@@ -89,6 +89,10 @@ class T3(nn.Module):
+     def device(self):
+         return self.speech_head.weight.device
+ 
++    @property
++    def dtype(self):
++        return self.speech_head.weight.dtype
++
+     def prepare_conditioning(self, t3_cond: T3Cond):
+         """
+         Token cond data needs to be embedded, so that needs to be here instead of in `T3CondEnc`.
+diff --git a/src/chatterbox/tts_turbo.py b/src/chatterbox/tts_turbo.py
+index e708f0c..118f0d9 100644
+--- a/src/chatterbox/tts_turbo.py
++++ b/src/chatterbox/tts_turbo.py
+@@ -1,4 +1,5 @@
+ import os
++os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+ import math
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -8,7 +9,7 @@ import torch
+ import perth
+ import pyloudnorm as ln
+ 
+-from safetensors.torch import load_file
++from safetensors.torch import load_file, safe_open
+ from huggingface_hub import snapshot_download
+ from transformers import AutoTokenizer
+ 
+@@ -86,8 +87,8 @@ class Conditionals:
+     t3: T3Cond
+     gen: dict
+ 
+-    def to(self, device):
+-        self.t3 = self.t3.to(device=device)
++    def to(self, device, dtype=None):
++        self.t3 = self.t3.to(device=device, dtype=dtype)
+         for k, v in self.gen.items():
+             if torch.is_tensor(v):
+                 self.gen[k] = v.to(device=device)
+@@ -146,7 +147,7 @@ class ChatterboxTurboTTS:
+         ve.load_state_dict(
+             load_file(ckpt_dir / "ve.safetensors")
+         )
+-        ve.to(device).eval()
++        ve.eval()  # Keep VoiceEncoder on CPU to avoid Tegra cuDNN allocation crashes
+ 
+         # Turbo/Nano share the same architecture; Nano just uses a smaller
+         # GPT2 backbone and its own T3 checkpoint.
+@@ -163,16 +164,44 @@ class ChatterboxTurboTTS:
+         t3_state = load_file(ckpt_dir / t3_ckpt)
+         if "model" in t3_state.keys():
+             t3_state = t3_state["model"][0]
++        use_bf16 = (device == "cuda" or (isinstance(device, str) and device.startswith("cuda")))
++        if use_bf16:
++            for k, v in t3_state.items():
++                if v.is_floating_point():
++                    t3_state[k] = v.to(torch.bfloat16)
++            t3.to(torch.bfloat16)
+         t3.load_state_dict(t3_state)
++        del t3_state
+         del t3.tfmr.wte
++        import gc
++        gc.collect()
++        if use_bf16:
++            torch.cuda.empty_cache()
+         t3.to(device).eval()
+ 
+         s3gen = S3Gen(meanflow=True)
+-        weights = load_file(ckpt_dir / "s3gen_meanflow.safetensors")
+-        s3gen.load_state_dict(
+-            weights, strict=True
+-        )
+-        s3gen.to(device).eval()
++        # Move target submodules to device first so their buffers are pre-allocated
++        s3gen.speaker_encoder.eval()
++        s3gen.flow.to(device).eval()
++        s3gen.mel2wav.to(device).eval()
++        s3gen.trim_fade = s3gen.trim_fade.to(device)
++
++        # In-place stream weights directly from disk into pre-allocated parameter memory
++        params = dict(s3gen.named_parameters())
++        buffers = dict(s3gen.named_buffers())
++        s3gen_path = ckpt_dir / "s3gen_meanflow.safetensors"
++        with safe_open(s3gen_path, framework="pt") as sf:
++            for k in sf.keys():
++                t = sf.get_tensor(k)
++                if k in params:
++                    params[k].data.copy_(t)
++                elif k in buffers:
++                    buffers[k].data.copy_(t)
++                del t
++        del params, buffers
++        gc.collect()
++        if use_bf16:
++            torch.cuda.empty_cache()
+ 
+         tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
+         if tokenizer.pad_token is None:
+@@ -183,7 +212,7 @@ class ChatterboxTurboTTS:
+         conds = None
+         builtin_voice = ckpt_dir / "conds.pt"
+         if builtin_voice.exists():
+-            conds = Conditionals.load(builtin_voice, map_location=map_location).to(device)
++            conds = Conditionals.load(builtin_voice, map_location=map_location).to(device, dtype=t3.dtype)
+ 
+         return cls(t3, s3gen, ve, tokenizer, device, conds=conds,
+                    model_label="Nano" if nano else "Turbo")
+@@ -260,13 +289,13 @@ class ChatterboxTurboTTS:
+ 
+         # Voice-encoder speaker embedding
+         ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+-        ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
++        ve_embed = ve_embed.mean(axis=0, keepdim=True).to(device=self.device, dtype=self.t3.dtype)
+ 
+         t3_cond = T3Cond(
+             speaker_emb=ve_embed,
+             cond_prompt_speech_tokens=t3_cond_prompt_tokens,
+-            emotion_adv=exaggeration * torch.ones(1, 1, 1),
+-        ).to(device=self.device)
++            emotion_adv=(exaggeration * torch.ones(1, 1, 1)).to(device=self.device, dtype=self.t3.dtype),
++        ).to(device=self.device, dtype=self.t3.dtype)
+         self.conds = Conditionals(t3_cond, s3gen_ref_dict)
+ 
+     def generate(
+@@ -295,6 +324,10 @@ class ChatterboxTurboTTS:
+         text_tokens = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+         text_tokens = text_tokens.input_ids.to(self.device)
+ 
++        # Ensure T3 is on device for token generation
++        if self.device != "cpu" and next(self.t3.parameters()).device.type != "cuda":
++            self.t3.to(self.device)
++
+         speech_tokens = self.t3.inference_turbo(
+             t3_cond=self.conds.t3,
+             text_tokens=text_tokens,
+@@ -304,6 +337,11 @@ class ChatterboxTurboTTS:
+             repetition_penalty=repetition_penalty,
+         )
+ 
++        # Move T3 to CPU to free 800MB of GPU memory for S3Gen vocoder
++        if self.device != "cpu":
++            self.t3.to("cpu")
++            torch.cuda.empty_cache()
++
+         # Remove OOV tokens and add silence to end
+         speech_tokens = speech_tokens[speech_tokens < 6561]
+         speech_tokens = speech_tokens.to(self.device)
+@@ -315,6 +353,9 @@ class ChatterboxTurboTTS:
+             ref_dict=self.conds.gen,
+             n_cfm_timesteps=2,
+         )
++        if self.device != "cpu":
++            torch.cuda.empty_cache()
++
+         wav = wav.squeeze(0).detach().cpu().numpy()
+         watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+         return torch.from_numpy(watermarked_wav).unsqueeze(0)

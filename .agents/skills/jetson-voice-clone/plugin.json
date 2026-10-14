@@ -1,0 +1,6 @@
+{
+  "name": "jetson-voice-clone",
+  "description": "Zero-shot offline voice cloning on NVIDIA Jetson Orin Nano with Chatterbox",
+  "version": "1.0.0"
+}
+
