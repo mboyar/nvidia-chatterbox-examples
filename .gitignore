@@ -24,13 +24,13 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
-.venv
+# Virtual environments & local python toolchain
 .venv/
 venv
 venv/
 ENV/
 env/
+.python/
 
 # Root CLI symlink
 /chatterbox_clone.py

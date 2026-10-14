@@ -1,0 +1,6 @@
+{
+  "name": "rtx-blackwell-voice-clone",
+  "description": "Zero-shot offline voice cloning and speech synthesis optimized for NVIDIA RTX PRO 2000 Blackwell (and RTX Blackwell series GPUs) with Chatterbox",
+  "version": "1.0.0"
+}
+
