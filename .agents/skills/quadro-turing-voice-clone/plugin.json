@@ -1,0 +1,5 @@
+{
+  "name": "quadro-turing-voice-clone",
+  "description": "Zero-shot offline voice cloning and speech synthesis optimized for NVIDIA Quadro T2000 (and Turing series GPUs within 4GB VRAM) with Chatterbox",
+  "version": "1.0.0"
+}

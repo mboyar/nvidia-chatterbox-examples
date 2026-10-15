@@ -1,6 +1,7 @@
 # NVIDIA Chatterbox Voice Cloning & Speech Synthesis
 
 Zero-shot, 100% offline voice cloning and text-to-speech synthesis using [Resemble AI Chatterbox](https://github.com/resemble-ai/chatterbox) across NVIDIA GPU architectures:
+- **NVIDIA Quadro T2000 with Max-Q Design** (and discrete Turing GPUs within 4GB VRAM, Compute Capability 7.5)
 - **NVIDIA RTX PRO 2000 Blackwell Laptop GPU** (and discrete RTX GPUs, Compute Capability 12.0)
 - **NVIDIA Jetson Orin Nano** (and Orin series unified memory, Compute Capability 8.7)
 
@@ -8,17 +9,57 @@ Zero-shot, 100% offline voice cloning and text-to-speech synthesis using [Resemb
 
 ## Supported Architectures & Skills
 
-| Feature | NVIDIA RTX PRO 2000 Blackwell (`rtx-blackwell-voice-clone`) | NVIDIA Jetson Orin Nano (`jetson-voice-clone`) |
-| :--- | :--- | :--- |
-| **GPU Architecture** | **Blackwell** (`sm_120`, CC 12.0) | **Ampere Tegra** (`sm_87`, CC 8.7) |
-| **VRAM** | **8,151 MiB Dedicated GDDR7** | **8 GB Shared LPDDR5 (Unified)** |
-| **Host System RAM** | **16 GB DDR5 (Separate)** | **None (Shared with GPU)** |
-| **Platform** | x86_64 / Linux (Ubuntu 26.04 under WSL2) | aarch64 / Linux Tegra (JetPack 6.x) |
-| **Pipeline Strategy** | **Resident VRAM** (All models on CUDA) | **Sequential Stage-Swapping** (T3 $\leftrightarrow$ CPU) |
-| **Peak VRAM** | ~1.85 GB (fits easily within 8GB VRAM) | <900 MB (prevents Tegra iGPU OOM) |
-| **Hardware Math** | 5th Gen Tensor Cores, **TF32** & **BF16** | 3rd Gen Tensor Cores, **BF16** |
-| **Inference Speed** | **>3.5x real-time** (>150 tokens/s) | **~1.7x real-time** (>50 tokens/s) |
-| **NVML Telemetry** | Full Support (`nvidia-smi`, memory tracking) | Unsupported (Tegra fallback assert) |
+| Feature | NVIDIA Quadro T2000 Turing (`quadro-turing-voice-clone`) | NVIDIA RTX PRO 2000 Blackwell (`rtx-blackwell-voice-clone`) | NVIDIA Jetson Orin Nano (`jetson-voice-clone`) |
+| :--- | :--- | :--- | :--- |
+| **GPU Architecture** | **Turing** (`sm_75`, CC 7.5) | **Blackwell** (`sm_120`, CC 12.0) | **Ampere Tegra** (`sm_87`, CC 8.7) |
+| **VRAM** | **4,096 MiB Dedicated GDDR6** | **8,151 MiB Dedicated GDDR7** | **8 GB Shared LPDDR5 (Unified)** |
+| **Host System RAM** | **30 GB DDR4 (Separate)** | **16 GB DDR5 (Separate)** | **None (Shared with GPU)** |
+| **Platform** | x86_64 / Linux (Ubuntu 26.04) | x86_64 / Linux (Ubuntu 26.04 under WSL2) | aarch64 / Linux Tegra (JetPack 6.x) |
+| **Pipeline Strategy** | **Resident VRAM** (Nano) / **Low-VRAM** (Turbo) | **Resident VRAM** (All models on CUDA) | **Sequential Stage-Swapping** (T3 $\leftrightarrow$ CPU) |
+| **Peak VRAM** | ~1.1 GB (Nano) / <950 MB (Turbo Low-VRAM) | ~1.85 GB (fits easily within 8GB VRAM) | <900 MB (prevents Tegra iGPU OOM) |
+| **Hardware Math** | 2nd Gen Tensor Cores, **Native FP16** | 5th Gen Tensor Cores, **TF32** & **BF16** | 3rd Gen Tensor Cores, **BF16** |
+| **Inference Speed** | **>2.5x real-time** (>90–120 tokens/s) | **>3.5x real-time** (>150 tokens/s) | **~1.7x real-time** (>50 tokens/s) |
+| **NVML Telemetry** | Full Support (`nvidia-smi`, memory tracking) | Full Support (`nvidia-smi`, memory tracking) | Unsupported (Tegra fallback assert) |
+
+
+---
+
+## 💻 Quick Start: NVIDIA Quadro T2000 & Turing GPUs
+
+### 1. Diagnostic Verification
+```bash
+./.agents/skills/quadro-turing-voice-clone/scripts/test_synthesis.sh
+```
+
+### 2. Setup Environment
+```bash
+# Create Python 3.12 venv with uv and install PyTorch with CUDA support
+uv venv .venv --python 3.12
+source .venv/bin/activate
+uv pip install --python .venv/bin/python torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python .venv/bin/python pip soundfile librosa huggingface_hub transformers diffusers pyloudnorm numpy
+
+# Clone and patch Chatterbox for Quadro Turing 4GB VRAM
+git clone https://github.com/resemble-ai/chatterbox.git
+python3 .agents/skills/quadro-turing-voice-clone/scripts/patch_chatterbox_turing.py chatterbox
+uv pip install --python .venv/bin/python -e chatterbox
+```
+
+### 3. Synthesize Speech
+```bash
+# Single sentence synthesis (Chatterbox-Nano default, ~1.1GB peak VRAM)
+python3 .agents/skills/quadro-turing-voice-clone/scripts/chatterbox_clone_turing.py \
+  --reference path/to/sample.wav \
+  --text "Hello! This voice clone is running offline on my NVIDIA Quadro T2000 GPU." \
+  --output output.wav
+
+# Synthesize full script and play audio
+python3 .agents/skills/quadro-turing-voice-clone/scripts/chatterbox_clone_turing.py \
+  --reference path/to/sample.wav \
+  --script input.txt \
+  --output full_speech.wav \
+  --play
+```
 
 ---
 
@@ -96,6 +137,21 @@ python3 .agents/skills/jetson-voice-clone/scripts/chatterbox_clone.py \
 ```
 nvidia-chatterbox-examples/
 ├── .agents/skills/
+│   ├── quadro-turing-voice-clone/      # Optimized for Quadro T2000 & Turing GPUs (4GB VRAM)
+│   │   ├── plugin.json                 # Antigravity skill manifest
+│   │   ├── SKILL.md                    # Agent skill documentation & runbook
+│   │   ├── scripts/
+│   │   │   ├── chatterbox_clone_turing.py # 4GB VRAM CLI synthesizer
+│   │   │   ├── patch_chatterbox_turing.py # Turing optimization patcher
+│   │   │   ├── test_synthesis.sh       # Hardware & CUDA diagnostic test
+│   │   │   └── install_skill.sh        # Antigravity (AGY) skill installer
+│   │   ├── resources/
+│   │   │   └── chatterbox_turing.patch
+│   │   └── references/
+│   │       ├── turing_gpu_architecture.md
+│   │       ├── chatterbox_turing_optimizations.md
+│   │       └── reference_audio_guide.md
+│   │
 │   ├── rtx-blackwell-voice-clone/      # Optimized for RTX PRO 2000 Blackwell & Discrete RTX GPUs
 │   │   ├── plugin.json                 # Antigravity skill manifest
 │   │   ├── SKILL.md                    # Agent skill documentation & runbook
@@ -132,9 +188,12 @@ nvidia-chatterbox-examples/
 
 ## Antigravity (AGY) Skill Installation
 
-Install either skill for automatic discovery across your Antigravity agent workflows:
+Install the appropriate skill for automatic discovery across your Antigravity agent workflows:
 
 ```bash
+# Install Quadro Turing skill
+./.agents/skills/quadro-turing-voice-clone/scripts/install_skill.sh workspace
+
 # Install RTX Blackwell skill
 ./.agents/skills/rtx-blackwell-voice-clone/scripts/install_skill.sh workspace
 
