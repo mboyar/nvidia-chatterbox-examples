@@ -1,0 +1,6 @@
+{
+  "name": "cpu-voice-clone",
+  "description": "Zero-shot offline voice cloning and speech synthesis on x86_64 CPUs (no GPU required) with Chatterbox / Chatterbox-Nano",
+  "version": "1.0.0"
+}
+
